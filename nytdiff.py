@@ -128,8 +128,10 @@ class BaseParser(object):
             print (text)
             return True
         try:
+            print("trying to tweet")
             tweet_id = self.api.update_status(status=text)
         except:
+            print("tweet failed")
             logging.exception('Tweet text failed')
             print (sys.exc_info()[0])
             return False
@@ -144,6 +146,7 @@ class BaseParser(object):
         logging.info('Article id: %s', article_id)
         reply_to = self.get_prev_tweet(article_id, column)
         if reply_to is None:
+            print("tweeting url: %s", url)
             logging.info('Tweeting url: %s', url)
             tweet = self.tweet_text(url)
             # if TESTING, give a random id based on time
@@ -286,6 +289,7 @@ class NYTParser(BaseParser):
                 'tweet_id': None
             }
             self.articles_table.insert(article)
+            print("new article tracked")
             logging.info('New article tracked: %s', data['url'])
             data['version'] = 1
             self.versions_table.insert(data)
@@ -383,11 +387,19 @@ class RSSParser(BaseParser):
         article_dict = dict()
         article_dict['article_id'] = article.id.split(' ')[0]
         article_dict['url'] = article.link
-        article_dict['title'] = article.title
-        article_dict['abstract'] = self.strip_html(article.description)
-        article_dict['author'] = article.author
+        article_dict['title'] = article.title_detail.value
+        article_dict['abstract'] = self.strip_html(article.summary_detail.value)
+        author_name = article.get("author", None)
+        if not author_name:
+            return None
+        article_dict['author'] = author_name
         # article_dict['illustration'] = article.media_content[0]['url']
         # article_dict['illustartion_size'] = article.media_content[0]['filesize']
+
+        if article_dict['article_id']=='https://www.latimes.com/california/story/2021-11-26/oil-sheen-scare-revives-concerns-about-damaged-pipeline':
+            print('changing title')
+            article_dict['title']=datetime.now(LOCAL_TZ).strftime("%m/%d/%Y, %H:%M:%S")
+
         od = collections.OrderedDict(sorted(article_dict.items()))
         article_dict['hash'] = hashlib.sha224(
             repr(od.items()).encode('utf-8')).hexdigest()
@@ -405,6 +417,7 @@ class RSSParser(BaseParser):
             }
             self.articles_table.insert(article)
             logging.info('New article tracked: %s', data['url'])
+            print('New article tracked')
             data['version'] = 1
             self.versions_table.insert(data)
         else:
@@ -423,6 +436,8 @@ class RSSParser(BaseParser):
             if count == 1:  # Existing
                 pass
             else:  # Changed
+                print("reinserting article, count: %s", count)
+
                 result = self.db.query('SELECT * \
                                        FROM rss_versions\
                                        WHERE article_id = "%s" \
@@ -455,6 +470,7 @@ class RSSParser(BaseParser):
 
     def loop_entries(self, entries):
         if len(entries) == 0:
+            print("empty rss feed")
             return False
         for article in entries:
             try:
@@ -475,8 +491,10 @@ class RSSParser(BaseParser):
         r = feedparser.parse(self.urls[0])
         if r is None:
             logging.warning('Empty response RSS')
+            print("empty response rss")
             return
         else:
+            print("parsing rss feed")
             logging.info('Parsing %s', r.feed.title)
         loop = self.loop_entries(r.entries)
         if loop:
@@ -499,6 +517,7 @@ def main():
     auth.secure = True
     auth.set_access_token(access_token, access_token_secret)
     twitter_api = tweepy.API(auth)
+    print("api configured")
     logging.debug('Twitter API configured')
 
     try:
@@ -507,7 +526,9 @@ def main():
         #nyt = NYTParser(nyt_api, nyt_api_key)
         rss_url = os.environ['RSS_URL']
         rss = RSSParser(twitter_api, rss_url)
+        print("making rss parser")
         rss.parse_rss()
+        print("parsed_rss")
         logging.debug('Finished RSS')
     except:
         logging.exception('RSS')
