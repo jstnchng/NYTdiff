@@ -20,7 +20,7 @@ from selenium import webdriver
 
 import feedparser
 
-TIMEZONE = 'Europe/Brussels'
+TIMEZONE = 'America/Los_Angeles'
 LOCAL_TZ = timezone(TIMEZONE)
 MAX_RETRIES = 10
 RETRY_DELAY = 3
@@ -134,6 +134,8 @@ class BaseParser(object):
             print("tweet failed")
             logging.exception('Tweet text failed')
             print (sys.exc_info()[0])
+            print (sys.exc_info()[1])
+            print (sys.exc_info()[2])
             return False
         return tweet_id
 
@@ -144,6 +146,9 @@ class BaseParser(object):
         images.append(image)
         logging.info('Text to tweet: %s', text)
         logging.info('Article id: %s', article_id)
+
+        print('Text to tweet: %s', text)
+        print('Article id: %s', article_id)
         reply_to = self.get_prev_tweet(article_id, column)
         if reply_to is None:
             print("tweeting url: %s", url)
@@ -255,127 +260,6 @@ class BaseParser(object):
         return ('\n'.join(self.urls))
 
 
-class NYTParser(BaseParser):
-    def __init__(self, api, nyt_api_key):
-        BaseParser.__init__(self, api)
-        self.urls = ['https://api.nytimes.com/svc/topstories/v2/home.json']
-        self.payload = {'api-key': nyt_api_key}
-        self.articles_table = self.db['nyt_ids']
-        self.versions_table = self.db['nyt_versions']
-
-    def json_to_dict(self, article):
-        article_dict = dict()
-        if 'short_url' not in article:
-            return None
-        article_dict['article_id'] = article['short_url'].split('/')[-1]
-        article_dict['url'] = article['url']
-        article_dict['title'] = article['title']
-        article_dict['abstract'] = self.strip_html(article['abstract'])
-        article_dict['byline'] = article['byline']
-        article_dict['kicker'] = article['kicker']
-        od = collections.OrderedDict(sorted(article_dict.items()))
-        article_dict['hash'] = hashlib.sha224(
-            repr(od.items()).encode('utf-8')).hexdigest()
-        article_dict['date_time'] = datetime.now(LOCAL_TZ)
-        return article_dict
-
-    def store_data(self, data):
-        if self.articles_table.find_one(
-                article_id=data['article_id']) is None:  # New
-            article = {
-                'article_id': data['article_id'],
-                'add_dt': data['date_time'],
-                'status': 'home',
-                'tweet_id': None
-            }
-            self.articles_table.insert(article)
-            print("new article tracked")
-            logging.info('New article tracked: %s', data['url'])
-            data['version'] = 1
-            self.versions_table.insert(data)
-        else:
-            # re insert
-            if self.articles_table.find_one(article_id=data['article_id'],
-                                            status='removed') is not None:
-                article = {
-                    'article_id': data['article_id'],
-                    'add_dt': data['date_time'],
-                }
-
-            count = self.versions_table.count(
-                self.versions_table.table.columns.article_id == data[
-                    'article_id'],
-                hash=data['hash'])
-            if count == 1:  # Existing
-                pass
-            else:  # Changed
-                result = self.db.query('SELECT * \
-                                       FROM nyt_versions\
-                                       WHERE article_id = "%s" \
-                                       ORDER BY version DESC \
-                                       LIMIT 1' % (data['article_id']))
-                for row in result:
-                    data['version'] = row['version']
-                    self.versions_table.insert(data)
-                    url = data['url']
-                    if row['url'] != data['url']:
-                        if self.show_diff(row['url'], data['url']):
-                            tweet_text = 'Change in URL'
-                            self.tweet(tweet_text, data['article_id'], url,
-                                       'article_id')
-                    if row['title'] != data['title']:
-                        if self.show_diff(row['title'], data['title']):
-                            tweet_text = 'Change in Title'
-                            self.tweet(tweet_text, data['article_id'], url,
-                                       'article_id')
-                    if row['abstract'] != data['abstract']:
-                        if self.show_diff(row['abstract'], data['abstract']):
-                            tweet_text = 'Change in Abstract'
-                            self.tweet(tweet_text, data['article_id'], url,
-                                       'article_id')
-                    if row['kicker'] != data['kicker']:
-                        if self.show_diff(row['kicker'], data['kicker']):
-                            tweet_text = 'Change in Kicker'
-                            self.tweet(tweet_text, data['article_id'], url,
-                                       'article_id')
-
-    def loop_data(self, data):
-        if 'results' not in data:
-            return False
-        for article in data['results']:
-            try:
-                article_dict = self.json_to_dict(article)
-                if article_dict is not None:
-                    self.store_data(article_dict)
-                    self.current_ids.add(article_dict['article_id'])
-            except BaseException as e:
-                logging.exception('Problem looping NYT: %s', article)
-                print ('Exception: {}'.format(str(e)))
-                print('***************')
-                print(article)
-                print('***************')
-                return False
-        return True
-
-    def parse_pages(self):
-        r = self.get_page(self.urls[0], None, self.payload)
-        if r is None or len(r.text) == 0:
-            logging.warning('Empty response NYT')
-            return
-        try:
-            data = json.loads(r.text, strict=False)
-        except BaseException as e:
-            logging.exception('Problem parsing page: %s', r.text)
-            print (e)
-            print (len(r.text))
-            print (type(r.text))
-            print (r.text)
-            print ('----')
-            return
-        loop = self.loop_data(data)
-        if loop:
-            self.remove_old('article_id')
-
 class RSSParser(BaseParser):
     def __init__(self, api, rss_url):
         BaseParser.__init__(self, api)
@@ -393,12 +277,6 @@ class RSSParser(BaseParser):
         if not author_name:
             return None
         article_dict['author'] = author_name
-        # article_dict['illustration'] = article.media_content[0]['url']
-        # article_dict['illustartion_size'] = article.media_content[0]['filesize']
-
-        if article_dict['article_id']=='https://www.latimes.com/california/story/2021-11-26/oil-sheen-scare-revives-concerns-about-damaged-pipeline':
-            print('changing title')
-            article_dict['title']=datetime.now(LOCAL_TZ).strftime("%m/%d/%Y, %H:%M:%S")
 
         od = collections.OrderedDict(sorted(article_dict.items()))
         article_dict['hash'] = hashlib.sha224(
@@ -436,7 +314,7 @@ class RSSParser(BaseParser):
             if count == 1:  # Existing
                 pass
             else:  # Changed
-                print("reinserting article, count: %s", count)
+                print("reinserting article, count: " + count)
 
                 result = self.db.query('SELECT * \
                                        FROM rss_versions\
@@ -449,22 +327,22 @@ class RSSParser(BaseParser):
                     url = data['url']
                     if row['url'] != data['url']:
                         if self.show_diff(row['url'], data['url']):
-                            tweet_text = "Modification d'URL"
+                            tweet_text = "Change in URL"
                             self.tweet(tweet_text, data['article_id'], url,
                                        'article_id')
                     if row['title'] != data['title']:
                         if self.show_diff(row['title'], data['title']):
-                            tweet_text = "Modification du Titre"
+                            tweet_text = "Change in Headline"
                             self.tweet(tweet_text, data['article_id'], url,
                                        'article_id')
                     if row['abstract'] != data['abstract']:
                         if self.show_diff(row['abstract'], data['abstract']):
-                            tweet_text = "Modification de la Description"
+                            tweet_text = "Change in Abstract"
                             self.tweet(tweet_text, data['article_id'], url,
                                        'article_id')
                     if row['author'] != data['author']:
                         if self.show_diff(row['author'], data['author']):
-                            tweet_text = "Modification de l'auteur"
+                            tweet_text = "Change in Author"
                             self.tweet(tweet_text, data['article_id'], url,
                                        'article_id')
 
@@ -509,10 +387,10 @@ def main():
     logging.getLogger("requests").setLevel(logging.WARNING)
     logging.info('Starting script')
 
-    consumer_key = os.environ['NYT_TWITTER_CONSUMER_KEY']
-    consumer_secret = os.environ['NYT_TWITTER_CONSUMER_SECRET']
-    access_token = os.environ['NYT_TWITTER_ACCESS_TOKEN']
-    access_token_secret = os.environ['NYT_TWITTER_ACCESS_TOKEN_SECRET']
+    consumer_key = os.environ['TWITTER_CONSUMER_KEY']
+    consumer_secret = os.environ['TWITTER_CONSUMER_SECRET']
+    access_token = os.environ['TWITTER_ACCESS_TOKEN']
+    access_token_secret = os.environ['TWITTER_ACCESS_TOKEN_SECRET']
     auth = tweepy.OAuthHandler(consumer_key, consumer_secret)
     auth.secure = True
     auth.set_access_token(access_token, access_token_secret)
@@ -522,8 +400,6 @@ def main():
 
     try:
         logging.debug('Starting RSS')
-        #nyt_api_key = os.environ['NYT_API_KEY']
-        #nyt = NYTParser(nyt_api, nyt_api_key)
         rss_url = os.environ['RSS_URL']
         rss = RSSParser(twitter_api, rss_url)
         print("making rss parser")
