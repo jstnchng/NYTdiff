@@ -23,6 +23,7 @@ TIMEZONE = 'America/Los_Angeles'
 LOCAL_TZ = timezone(TIMEZONE)
 MAX_RETRIES = 10
 RETRY_DELAY = 3
+ENV=os.environ['ENV']
 
 if 'TESTING' in os.environ:
     if os.environ['TESTING'] == 'False':
@@ -37,7 +38,10 @@ if 'LOG_FOLDER' in os.environ:
 else:
     LOG_FOLDER = ''
 
-PHANTOMJS_PATH = os.environ['PHANTOMJS_PATH']
+if ENV == 'local':
+    PHANTOMJS_PATH = os.environ['PHANTOMJS_PATH']
+else:
+    PHANTOMJS_PATH = os.environ['LAMBDA_TASK_ROOT']
 
 
 class BaseParser(object):
@@ -45,7 +49,6 @@ class BaseParser(object):
         self.urls = list()
         self.payload = None
         self.articles = dict()
-        self.current_ids = set()
         self.filename = str()
         self.db = db
         self.api = api
@@ -72,6 +75,7 @@ class BaseParser(object):
         if response is None or response['Item'] is None:
             return None
         else:
+            print(response)
             if 'tweet_id' in response['Item'] and response['Item']['tweet_id']['N'] > 0:
                 return response['Item']['tweet_id']['N']
             else:
@@ -350,6 +354,7 @@ class RSSParser(BaseParser):
                 TableName='rss_versions',
                 Item=version_data
             )
+            return "New"
         else:
             # re insert
             count_resp = self.db.query(
@@ -373,7 +378,7 @@ class RSSParser(BaseParser):
 
             if count == 1:  # Existing
                 print('store_data: article already exists, so skipping')
-                pass
+                return "Existing"
             else:  # Changed
                 print("store_data: new data in existing article")
 
@@ -420,24 +425,27 @@ class RSSParser(BaseParser):
                         self.tweet(tweet_text, data['article_id'], url,
                                    'article_id')
 
+                return "Changed"
+
     def loop_entries(self, entries):
         if len(entries) == 0:
             print("loop_entries: empty rss feed")
             return False
+        results = []
         for article in entries:
             try:
                 article_dict = self.entry_to_dict(article)
                 if article_dict is not None:
-                    self.store_data(article_dict)
-                    self.current_ids.add(article_dict['article_id'])
+                    result = self.store_data(article_dict)
+                    results.append(result)
             except BaseException as e:
                 logging.exception('Problem looping RSS: %s', article)
                 print ('Exception: {}'.format(str(e)))
                 print('***************')
                 print(article)
                 print('***************')
-                return False
-        return True
+                raise(e)
+        return results
 
     def parse_rss(self):
         r = feedparser.parse(self.urls[0])
@@ -448,10 +456,25 @@ class RSSParser(BaseParser):
         else:
             print("parse_rss: parsing rss feed: {}".format(r.feed.title))
             logging.info('Parsing %s', r.feed.title)
-        self.loop_entries(r.entries)
-        # loop = self.loop_entries(r.entries)
-        #  if loop:
-            #  self.remove_old('article_id')
+        results = self.loop_entries(r.entries)
+        return results
+
+    def process_results(self, results):
+        newNum = 0
+        existingNum = 0
+        changedNum = 0
+        for result in results:
+            if result == "New":
+                newNum += 1
+            if result == "Existing":
+                existingNum += 1
+            if result == "Changed":
+                changedNum += 1
+        print("process_results: new articles: {}, unchanged articles: {}, changed articles: {}".format(newNum, existingNum, changedNum))
+
+
+def lambda_function(event, context):
+    main()
 
 
 def main():
@@ -476,18 +499,24 @@ def main():
 
     aws_access_key_id = os.environ['AWS_ACCESS_KEY_ID']
     aws_secret_access_key = os.environ['AWS_SECRET_ACCESS_KEY']
-    db = boto3.client('dynamodb', aws_access_key_id=aws_access_key_id, aws_secret_access_key=aws_secret_access_key)
+    if ENV == 'local':
+        db = boto3.client('dynamodb', aws_access_key_id=aws_access_key_id, aws_secret_access_key=aws_secret_access_key)
+    else:
+        aws_session_token = os.environ['AWS_SESSION_TOKEN']
+        db = boto3.client('dynamodb', region_name='us-west-2', aws_session_token=aws_session_token, aws_access_key_id=aws_access_key_id, aws_secret_access_key=aws_secret_access_key)
 
     try:
         print('main: starting RSS parse')
         logging.debug('main: starting RSS parse')
         rss_url = os.environ['RSS_URL']
         rss = RSSParser(twitter_api, rss_url, db)
-        rss.parse_rss()
+        results = rss.parse_rss()
+        rss.process_results(results)
         print("main: finished parsing RSS")
         logging.debug('Finished RSS')
-    except:
+    except BaseException as e:
         logging.exception('RSS')
+        raise(e)
 
     print('main: Finished script')
     logging.info('Finished script')
