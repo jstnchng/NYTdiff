@@ -17,4 +17,4 @@ selenium==2.53.6
 simplediff==1.0
 six==1.10.0
 SQLAlchemy==1.0.15
-tweepy==4.4.0
+tweepy==3.5.0

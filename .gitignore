@@ -3,3 +3,5 @@ tmp*
 output/*
 config.txt
 *.db
+requirements/
+.DS_Store

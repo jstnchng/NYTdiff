@@ -3,20 +3,19 @@
 import collections
 from datetime import datetime
 import hashlib
-import json
 import logging
 import os
 import sys
 import time
 
 import bleach
-import dataset
 from PIL import Image
 from pytz import timezone
 import requests
 import tweepy
 from simplediff import html_diff
 from selenium import webdriver
+import boto3
 
 import feedparser
 
@@ -42,56 +41,59 @@ PHANTOMJS_PATH = os.environ['PHANTOMJS_PATH']
 
 
 class BaseParser(object):
-    def __init__(self, api):
+    def __init__(self, api, db):
         self.urls = list()
         self.payload = None
         self.articles = dict()
         self.current_ids = set()
         self.filename = str()
-        self.db = dataset.connect('sqlite:///titles.db')
+        self.db = db
         self.api = api
 
     def test_twitter(self):
         print(self.api.rate_limit_status())
         print(self.api.me().name)
 
-    def remove_old(self, column='id'):
-        db_ids = set()
-        for nota_db in self.articles_table.find(status='home'):
-            db_ids.add(nota_db[column])
-        for to_remove in (db_ids - self.current_ids):
-            if column == 'id':
-                data = dict(id=to_remove, status='removed')
-            else:
-                data = dict(article_id=to_remove, status='removed')
-            self.articles_table.update(data, [column])
-            logging.info('Removed %s', to_remove)
+    def get_article_by_id(self, article_id):
+        response = self.db.get_item(
+            TableName='rss_ids',
+            Key={
+                'article_id': {
+                    'S': article_id
+                }
+            }
+        )
+
+        return response
 
     def get_prev_tweet(self, article_id, column):
-        if column == 'id':
-            search = self.articles_table.find_one(id=article_id)
-        else:
-            search = self.articles_table.find_one(article_id=article_id)
-        if search is None:
+        response = self.get_article_by_id(article_id)
+
+        if response is None or response['Item'] is None:
             return None
         else:
-            if 'tweet_id' in search:
-                return search['tweet_id']
+            if 'tweet_id' in response['Item'] and response['Item']['tweet_id']['N'] > 0:
+                return response['Item']['tweet_id']['N']
             else:
                 return None
 
     def update_tweet_db(self, article_id, tweet_id, column):
-        if column == 'id':
-            article = {
-                'id': article_id,
-                'tweet_id': tweet_id
-            }
-        else:
-            article = {
-                'article_id': article_id,
-                'tweet_id': tweet_id
-            }
-        self.articles_table.update(article, [column])
+        self.db.update_item(
+            TableName='rss_ids',
+            Key={
+                'article_id': {
+                    'S': article_id
+                }
+            },
+            UpdateExpression="set tweet_id=:tweet_id",
+            ExpressionAttributeValues={
+                ':tweet_id': {
+                    'N': str(tweet_id)
+                }
+            },
+            ReturnValues="UPDATED_NEW"
+        )
+        print('update_tweet_db: updated article_id: {}, new tweet_id: {}'.format(article_id, tweet_id))
         logging.debug('Updated tweet ID in db')
 
     def media_upload(self, filename):
@@ -101,6 +103,7 @@ class BaseParser(object):
             response = self.api.media_upload(filename)
         except:
             print (sys.exc_info()[0])
+            print('media_upload: uploaded new media')
             logging.exception('Media upload')
             return False
         return response.media_id_string
@@ -118,6 +121,7 @@ class BaseParser(object):
                 tweet_id = self.api.update_status(
                     status=text, media_ids=images)
         except:
+            print('tweet_with_media: failed')
             logging.exception('Tweet with media failed')
             print (sys.exc_info()[0])
             return False
@@ -125,13 +129,13 @@ class BaseParser(object):
 
     def tweet_text(self, text):
         if TESTING:
-            print (text)
+            print(text)
             return True
         try:
-            print("trying to tweet")
+            print("tweet_text: sending new tweet")
             tweet_id = self.api.update_status(status=text)
         except:
-            print("tweet failed")
+            print("tweet_text: tweet failed")
             logging.exception('Tweet text failed')
             print (sys.exc_info()[0])
             print (sys.exc_info()[1])
@@ -142,27 +146,28 @@ class BaseParser(object):
     def tweet(self, text, article_id, url, column='id'):
         images = list()
         image = self.media_upload('./output/' + self.filename + '.png')
+        print('tweet: Media: {}, text to tweet: {}, new article id: {}'.format(image, text, article_id))
         logging.info('Media ready with ids: %s', image)
         images.append(image)
         logging.info('Text to tweet: %s', text)
         logging.info('Article id: %s', article_id)
 
-        print('Text to tweet: %s', text)
-        print('Article id: %s', article_id)
         reply_to = self.get_prev_tweet(article_id, column)
         if reply_to is None:
-            print("tweeting url: %s", url)
+            print("tweet: tweeting url: {}".format(url))
             logging.info('Tweeting url: %s', url)
             tweet = self.tweet_text(url)
             # if TESTING, give a random id based on time
             reply_to = tweet.id if not TESTING else time.time()
+        print('tweet: replying to: {}'.format(reply_to))
         logging.info('Replying to: %s', reply_to)
         tweet = self.tweet_with_media(text, images, reply_to)
-        if TESTING :
+        if TESTING:
             # if TESTING, give a random id based on time
             tweet_id = time.time()
         else:
             tweet_id = tweet.id
+        print('tweet: Id to store: {}'.format(tweet_id))
         logging.info('Id to store: %s', tweet_id)
         self.update_tweet_db(article_id, tweet_id, column)
         return
@@ -173,12 +178,12 @@ class BaseParser(object):
                 r = requests.get(url=url, headers=header, params=payload)
             except BaseException as e:
                 if x == MAX_RETRIES - 1:
-                    print ('Max retries reached')
+                    print('get_page: Max retries reached')
                     logging.warning('Max retries for: %s', url)
                     return None
                 if '104' not in str(e):
-                    print('Problem with url {}'.format(url))
-                    print('Exception: {}'.format(str(e)))
+                    print('get_page: Problem with url {}'.format(url))
+                    print('get_page: Exception: {}'.format(str(e)))
                     logging.exception('Problem getting page')
                     return None
                 time.sleep(RETRY_DELAY)
@@ -202,7 +207,8 @@ class BaseParser(object):
 
     def show_diff(self, old, new):
         if len(old) == 0 or len(new) == 0:
-            logging.info('Old or New empty')
+            print('show_diff: Old or New empty')
+            logging.info('show_diff: Old or New empty')
             return False
         new_hash = hashlib.sha224(new.encode('utf8')).hexdigest()
         logging.info(html_diff(old, new))
@@ -261,11 +267,9 @@ class BaseParser(object):
 
 
 class RSSParser(BaseParser):
-    def __init__(self, api, rss_url):
-        BaseParser.__init__(self, api)
+    def __init__(self, api, rss_url, db):
+        BaseParser.__init__(self, api, db)
         self.urls = [rss_url]
-        self.articles_table = self.db['rss_ids']
-        self.versions_table = self.db['rss_versions']
 
     def entry_to_dict(self, article):
         article_dict = dict()
@@ -281,74 +285,144 @@ class RSSParser(BaseParser):
         od = collections.OrderedDict(sorted(article_dict.items()))
         article_dict['hash'] = hashlib.sha224(
             repr(od.items()).encode('utf-8')).hexdigest()
-        article_dict['date_time'] = datetime.now(LOCAL_TZ)
+        article_dict['date_time'] = datetime.now(LOCAL_TZ).strftime("%Y-%m-%dT%H:%M:%S%z")
         return article_dict
 
+    def build_version(self, version, data):
+        version_data = {
+            'version': {
+                'N': version,
+            },
+            'abstract': {
+                'S': data['abstract'],
+            },
+            'url': {
+                'S': data['url'],
+            },
+            'date_time': {
+                'S': data['date_time'],
+            },
+            'title': {
+                'S': data['title'],
+            },
+            'article_id': {
+                'S': data['article_id'],
+            },
+            'hash': {
+                'S': data['hash'],
+            },
+            'author': {
+                'S': data['author'],
+            },
+        }
+
+        return version_data
+
     def store_data(self, data):
-        if self.articles_table.find_one(
-                article_id=data['article_id']) is None:  # New
+        response = self.get_article_by_id(data['article_id'])
+
+        # New article
+        if response.get('Item') is None:
             article = {
-                'article_id': data['article_id'],
-                'add_dt': data['date_time'],
-                'status': 'home',
-                'tweet_id': None
+                'article_id': {
+                    'S': data['article_id'],
+                },
+                'add_dt': {
+                    'S': data['date_time'],
+                },
+                'status': {
+                    'S': 'home',
+                },
+                'tweet_id': {
+                    'N': '-1',
+                },
             }
-            self.articles_table.insert(article)
+
+            self.db.put_item(
+                TableName='rss_ids',
+                Item=article
+            )
+            print('store_data: New article tracked: {}'.format(data['url']))
             logging.info('New article tracked: %s', data['url'])
-            print('New article tracked')
-            data['version'] = 1
-            self.versions_table.insert(data)
+
+            version_data = self.build_version("1", data)
+            self.db.put_item(
+                TableName='rss_versions',
+                Item=version_data
+            )
         else:
             # re insert
-            if self.articles_table.find_one(article_id=data['article_id'],
-                                            status='removed') is not None:
-                article = {
-                    'article_id': data['article_id'],
-                    'add_dt': data['date_time'],
-                }
+            count_resp = self.db.query(
+                TableName='rss_versions',
+                Select='COUNT',
+                KeyConditionExpression='article_id = :article_id',
+                FilterExpression='#hash = :hash',
+                ExpressionAttributeNames={
+                    '#hash': 'hash'
+                },
+                ExpressionAttributeValues={
+                    ':article_id': {
+                        'S': data['article_id']
+                    },
+                    ':hash': {
+                        'S': data['hash']
+                    }
+                },
+            )
+            count = count_resp['Count']
 
-            count = self.versions_table.count(
-                self.versions_table.table.columns.article_id == data[
-                    'article_id'],
-                hash=data['hash'])
             if count == 1:  # Existing
+                print('store_data: article already exists, so skipping')
                 pass
             else:  # Changed
-                print("reinserting article, count: " + count)
+                print("store_data: new data in existing article")
 
-                result = self.db.query('SELECT * \
-                                       FROM rss_versions\
-                                       WHERE article_id = "%s" \
-                                       ORDER BY version DESC \
-                                       LIMIT 1' % (data['article_id']))
-                for row in result:
-                    data['version'] = row['version']
-                    self.versions_table.insert(data)
-                    url = data['url']
-                    if row['url'] != data['url']:
-                        if self.show_diff(row['url'], data['url']):
-                            tweet_text = "Change in URL"
-                            self.tweet(tweet_text, data['article_id'], url,
-                                       'article_id')
-                    if row['title'] != data['title']:
-                        if self.show_diff(row['title'], data['title']):
-                            tweet_text = "Change in Headline"
-                            self.tweet(tweet_text, data['article_id'], url,
-                                       'article_id')
-                    if row['abstract'] != data['abstract']:
-                        if self.show_diff(row['abstract'], data['abstract']):
-                            tweet_text = "Change in Abstract"
-                            self.tweet(tweet_text, data['article_id'], url,
-                                       'article_id')
-                    if row['author'] != data['author']:
-                        if self.show_diff(row['author'], data['author']):
-                            tweet_text = "Change in Author"
-                            self.tweet(tweet_text, data['article_id'], url,
-                                       'article_id')
+                result = self.db.query(
+                    TableName='rss_versions',
+                    KeyConditionExpression='article_id = :article_id',
+                    ExpressionAttributeValues={
+                        ':article_id': {
+                            'S': data['article_id']
+                        },
+                    },
+                    Limit=1,
+                    ScanIndexForward=False
+                )
+
+                row = result['Items'][0]
+
+                data['version'] = row['version']['N']
+                updated_version_data = self.build_version(str(data['version']), data)
+                self.db.put_item(
+                    TableName='rss_versions',
+                    Item=updated_version_data
+                )
+
+                url = data['url']
+                if row['url']['S'] != data['url']:
+                    if self.show_diff(row['url']['S'], data['url']):
+                        tweet_text = "Change in URL"
+                        self.tweet(tweet_text, data['article_id'], url,
+                                   'article_id')
+                if row['title']['S'] != data['title']:
+                    if self.show_diff(row['title']['S'], data['title']):
+                        tweet_text = "Change in Headline"
+                        self.tweet(tweet_text, data['article_id'], url,
+                                   'article_id')
+                if row['abstract']['S'] != data['abstract']:
+                    if self.show_diff(row['abstract']['S'], data['abstract']):
+                        tweet_text = "Change in Abstract"
+                        self.tweet(tweet_text, data['article_id'], url,
+                                   'article_id')
+                if row['author']['S'] != data['author']:
+                    if self.show_diff(row['author']['S'], data['author']):
+                        tweet_text = "Change in Author"
+                        self.tweet(tweet_text, data['article_id'], url,
+                                   'article_id')
 
     def loop_entries(self, entries):
         if len(entries) == 0:
-            print("empty rss feed")
+            print("loop_entries: empty rss feed")
             return False
         for article in entries:
             try:
@@ -368,15 +442,17 @@ class RSSParser(BaseParser):
     def parse_rss(self):
         r = feedparser.parse(self.urls[0])
         if r is None:
+            print("parse_rss: empty response rss")
             logging.warning('Empty response RSS')
-            print("empty response rss")
             return
         else:
-            print("parsing rss feed")
+            print("parse_rss: parsing rss feed: {}".format(r.feed.title))
             logging.info('Parsing %s', r.feed.title)
-        loop = self.loop_entries(r.entries)
-        if loop:
-            self.remove_old('article_id')
+        self.loop_entries(r.entries)
+        # loop = self.loop_entries(r.entries)
+        #  if loop:
+            #  self.remove_old('article_id')
+
 
 def main():
     # logging
@@ -395,20 +471,25 @@ def main():
     auth.secure = True
     auth.set_access_token(access_token, access_token_secret)
     twitter_api = tweepy.API(auth)
-    print("api configured")
+    print("main: twitter api configured")
     logging.debug('Twitter API configured')
 
+    aws_access_key_id = os.environ['AWS_ACCESS_KEY_ID']
+    aws_secret_access_key = os.environ['AWS_SECRET_ACCESS_KEY']
+    db = boto3.client('dynamodb', aws_access_key_id=aws_access_key_id, aws_secret_access_key=aws_secret_access_key)
+
     try:
-        logging.debug('Starting RSS')
+        print('main: starting RSS parse')
+        logging.debug('main: starting RSS parse')
         rss_url = os.environ['RSS_URL']
-        rss = RSSParser(twitter_api, rss_url)
-        print("making rss parser")
+        rss = RSSParser(twitter_api, rss_url, db)
         rss.parse_rss()
-        print("parsed_rss")
+        print("main: finished parsing RSS")
         logging.debug('Finished RSS')
     except:
         logging.exception('RSS')
 
+    print('main: Finished script')
     logging.info('Finished script')
 
 
