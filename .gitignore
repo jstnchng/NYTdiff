@@ -5,5 +5,13 @@ config.txt
 *.db
 requirements/
 .DS_Store
-NYTdiff/
+NYTdiff*/
 .python-version
+test*
+cropped*
+trimmed*
+*.jpg
+*.png
+selenium/
+img*
+nyt-env/

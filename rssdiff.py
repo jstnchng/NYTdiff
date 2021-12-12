@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-
 import collections
 from datetime import datetime
 import hashlib
@@ -7,14 +6,15 @@ import logging
 import os
 import sys
 import time
+import re
 
 import bleach
-from PIL import Image
+import imgkit
+from PIL import Image, ImageChops
 from pytz import timezone
 import requests
 import tweepy
 from simplediff import html_diff
-from selenium import webdriver
 import boto3
 
 import feedparser
@@ -39,9 +39,18 @@ else:
     LOG_FOLDER = ''
 
 if ENV == 'local':
-    PHANTOMJS_PATH = os.environ['PHANTOMJS_PATH']
+    local_path = './'
 else:
-    PHANTOMJS_PATH = os.environ['LAMBDA_TASK_ROOT']
+    #  os.system('cp /var/task/phantomjs {}/phantomjs'.format(os.environ['LAMBDA_TASK_ROOT']))
+    #  os.system('ls -la /var/task/')
+    #  os.system('ls -la /var/task/style')
+    #  os.system('ls -la /var/task/style/fonts')
+    #  os.system('ls -la /var/task/style/img')
+    #  sys.path.append(os.environ['LAMBDA_TASK_ROOT'])
+    #  os.system('which wkhtmltoimage')
+    output_path = os.path.join('/tmp', 'output')
+    os.mkdir(output_path)
+    local_path = "/tmp/"
 
 
 class BaseParser(object):
@@ -76,7 +85,7 @@ class BaseParser(object):
             return None
         else:
             print(response)
-            if 'tweet_id' in response['Item'] and response['Item']['tweet_id']['N'] > 0:
+            if 'tweet_id' in response['Item'] and int(response['Item']['tweet_id']['N']) > 0:
                 return response['Item']['tweet_id']['N']
             else:
                 return None
@@ -149,7 +158,7 @@ class BaseParser(object):
 
     def tweet(self, text, article_id, url, column='id'):
         images = list()
-        image = self.media_upload('./output/' + self.filename + '.png')
+        image = self.media_upload(local_path + 'output/' + self.filename + '.png')
         print('tweet: Media: {}, text to tweet: {}, new article id: {}'.format(image, text, article_id))
         logging.info('Media ready with ids: %s', image)
         images.append(image)
@@ -209,19 +218,69 @@ class BaseParser(object):
                             styles=styles,
                             strip=strip)
 
-    def show_diff(self, old, new):
+    def add_border(self, bbox):
+        return (bbox[0] - 50, bbox[1] - 50, bbox[2] + 50, bbox[3] + 50)
+
+    def resize(self, im):
+        desired_width = 400
+        desired_height = 223
+
+        if img_w > desired_width or img_h > desired_height:
+            if img_h > img_w/2:
+                desired_width = img_h*2
+                desired_height = img_h
+                print("resize: image is larger than 400, 200. changing width to match height")
+            else:
+                desired_height = img_w//2
+                desired_width = img_w
+                print("resize: image is larger than 400, 200. changing height to match width")
+
+        background = Image.new('RGBA', (desired_width, desired_height), (255, 255, 255, 0))
+        bg_w, bg_h = background.size
+        img_w, img_h = im.size
+        offset = ((bg_w - img_w) // 2, (bg_h - img_h) // 2)
+        background.paste(
+            im,
+            offset
+        )
+
+        return background
+
+    def trim(self, im):
+        bg = Image.new(im.mode, im.size, im.getpixel((0,0)))
+        diff = ImageChops.difference(im, bg)
+        #  print("imgchops diff size")
+        #  print(diff.size)
+        diff = ImageChops.add(diff, diff, 2.0, -100)
+        #  print("imgchops diff size2")
+        #  print(diff2.size)
+        diff = diff.convert('RGB')
+        bbox = diff.getbbox()
+        #  if bbox is None:
+            #  bbox = im.getbbox()
+            #  print(bbox)
+        border_bbox = self.add_border(bbox)
+        cropped_im = im.crop(border_bbox)
+        return self.resize(cropped_im)
+
+    def show_diff(self, old, new, img_path):
         if len(old) == 0 or len(new) == 0:
             print('show_diff: Old or New empty')
             logging.info('show_diff: Old or New empty')
             return False
         new_hash = hashlib.sha224(new.encode('utf8')).hexdigest()
         logging.info(html_diff(old, new))
+
+        if ENV == 'local':
+            css_path = './css/styles.css'
+        else:
+            css_path = '/var/task/style/css/styles.css'
         html = """
         <!doctype html>
         <html lang="en">
           <head>
             <meta charset="utf-8">
-            <link rel="stylesheet" href="./css/styles.css">
+            <link rel="stylesheet" href="{}">
           </head>
           <body>
           <p>
@@ -229,41 +288,90 @@ class BaseParser(object):
           </p>
           </body>
         </html>
-        """.format(html_diff(old, new))
-        with open('tmp.html', 'w') as f:
+        """.format(css_path, html_diff(old, new))
+        tmp_path = local_path + 'tmp.html'
+        with open(tmp_path, 'w') as f:
             f.write(html)
+        print("html: " + html)
 
-        driver = webdriver.PhantomJS(
-            executable_path=PHANTOMJS_PATH + 'phantomjs')
-        driver.get('tmp.html')
-        e = driver.find_element_by_xpath('//p')
-        start_height = e.location['y']
-        block_height = e.size['height']
-        end_height = start_height
-        start_width = e.location['x']
-        block_width = e.size['width']
-        end_width = start_width
-        total_height = start_height + block_height + end_height
-        total_width = start_width + block_width + end_width
+        options = {
+            "enable-local-file-access": None
+        }
+        #  if ENV == 'local':
+            #  imgkit.from_file(tmp_path, img_path, options=options)
+        #  else:
+            #  config = imgkit.config(wkhtmltoimage='/var/task/wkhtmltoimage')
+            #  imgkit.from_file(tmp_path, img_path, options=options, config=config)
+        imgkit.from_file(tmp_path, img_path, options=options)
+
+        im = Image.open(img_path)
+        im = self.trim(im)
+        #  bg = Image.new(im.mode, im.size, im.getpixel((0,0)))
+        #  diff = ImageChops.difference(im, bg)
+        #  diff = ImageChops.add(diff, diff, 2.0, -100)
+        #  bbox = diff.getbbox()
+#
+        #  border_bbox = (bbox[0] - 50, bbox[1] - 50, bbox[2] + 50, bbox[3] + 50)
+        #  cropped_im = im.crop(border_bbox)
+        #  # cropped_im = im.crop(bbox)
+#
+        #  cropped_im.save(local_path + 'cropped_' + str(int(time.time())) + '.png')
+#
+        #  desired_width = 400
+        #  desired_height = 223
+        #  background = Image.new('RGBA', (desired_width, desired_height), (255, 255, 255, 0))
+        #  bg_w, bg_h = background.size
+        #  img_w, img_h = cropped_im.size
+        #  offset = ((bg_w - img_w) // 2, (bg_h - img_h) // 2)
+        #  background.paste(
+            #  im,
+            #  offset
+        #  )
+#
+        #  background.show()
+
         timestamp = str(int(time.time()))
-        driver.save_screenshot('./tmp.png')
-        img = Image.open('./tmp.png')
-        img2 = img.crop((0, 0, total_width, total_height))
-        if int(total_width) > int(total_height * 2):
-            background = Image.new('RGBA', (total_width, int(total_width / 2)),
-                                   (255, 255, 255, 0))
-            bg_w, bg_h = background.size
-            offset = (int((bg_w - total_width) / 2),
-                      int((bg_h - total_height) / 2))
-        else:
-            background = Image.new('RGBA', (total_width, total_height),
-                                   (255, 255, 255, 0))
-            bg_w, bg_h = background.size
-            offset = (int((bg_w - total_width) / 2),
-                      int((bg_h - total_height) / 2))
-        background.paste(img2, offset)
         self.filename = timestamp + new_hash
-        background.save('./output/' + self.filename + '.png')
+
+        im.save(local_path + 'output/' + self.filename + '.png')
+
+        #  if ENV == 'local':
+            #  driver = webdriver.PhantomJS(
+                #  executable_path=PHANTOMJS_PATH + '/phantomjs')
+        #  else:
+            #  driver = webdriver.PhantomJS(
+                #  executable_path=PHANTOMJS_PATH + '/phantomjs',
+                #  service_log_path='/tmp/ghostdriver.log')
+        #  driver.get(tmp_path)
+        #  e = driver.find_element_by_xpath('//p')
+        #  start_height = e.location['y']
+        #  block_height = e.size['height']
+        #  end_height = start_height
+        #  start_width = e.location['x']
+        #  block_width = e.size['width']
+        #  end_width = start_width
+        #  total_height = start_height + block_height + end_height
+        #  total_width = start_width + block_width + end_width
+        #  timestamp = str(int(time.time()))
+        #  driver.save_screenshot(img_path)
+        #  driver.quit()
+        #  img = Image.open(img_path)
+        #  img2 = img.crop((0, 0, total_width, total_height))
+        #  if int(total_width) > int(total_height * 2):
+            #  background = Image.new('RGBA', (total_width, int(total_width / 2)),
+                                   #  (255, 255, 255, 0))
+            #  bg_w, bg_h = background.size
+            #  offset = (int((bg_w - total_width) / 2),
+                      #  int((bg_h - total_height) / 2))
+        #  else:
+            #  background = Image.new('RGBA', (total_width, total_height),
+                                   #  (255, 255, 255, 0))
+            #  bg_w, bg_h = background.size
+            #  offset = (int((bg_w - total_width) / 2),
+                      #  int((bg_h - total_height) / 2))
+        #  background.paste(img2, offset)
+        #  self.filename = timestamp + new_hash
+        #  background.save(local_path + 'output/' + self.filename + '.png')
         return True
 
     def __str__(self):
@@ -286,10 +394,19 @@ class RSSParser(BaseParser):
             return None
         article_dict['author'] = author_name
 
+        if article_dict['article_id'] == 'https://www.latimes.com/california/story/2021-12-05/wars-painful-legacy-twenty-years-later-remembering-brian-cody-prosser':
+            article_dict['title'] = os.environ['new_title']
+        if article_dict['article_id'] == 'https://www.latimes.com/california/story/2021-12-05/shes-terrified-of-covid-works-at-home-he-goes-to-the-office-whats-a-family-to-do':
+            article_dict['title'] = os.environ['new_title']
+
         od = collections.OrderedDict(sorted(article_dict.items()))
         article_dict['hash'] = hashlib.sha224(
             repr(od.items()).encode('utf-8')).hexdigest()
         article_dict['date_time'] = datetime.now(LOCAL_TZ).strftime("%Y-%m-%dT%H:%M:%S%z")
+
+        #  if article_dict['article_id'] == 'https://www.latimes.com/california/story/2021-12-08/marking-one-year-in-office-l-a-d-a-gascon-touts-accomplishments-spars-with-critics-on-crime':
+            #  print("new article dict")
+            #  print(article_dict)
         return article_dict
 
     def build_version(self, version, data):
@@ -324,6 +441,8 @@ class RSSParser(BaseParser):
 
     def store_data(self, data):
         response = self.get_article_by_id(data['article_id'])
+        #  if data['article_id'] == 'https://www.latimes.com/california/story/2021-12-08/marking-one-year-in-office-l-a-d-a-gascon-touts-accomplishments-spars-with-critics-on-crime':
+            #  print(response)
 
         # New article
         if response.get('Item') is None:
@@ -376,6 +495,25 @@ class RSSParser(BaseParser):
             )
             count = count_resp['Count']
 
+            #  resp = self.db.query(
+                #  TableName='rss_versions',
+                #  KeyConditionExpression='article_id = :article_id',
+                #  FilterExpression='#hash = :hash',
+                #  ExpressionAttributeNames={
+                    #  '#hash': 'hash'
+                #  },
+                #  ExpressionAttributeValues={
+                    #  ':article_id': {
+                        #  'S': data['article_id']
+                    #  },
+                    #  ':hash': {
+                        #  'S': data['hash']
+                    #  }
+                #  },
+            #  )
+            #  if data['article_id'] == 'https://www.latimes.com/california/story/2021-12-08/marking-one-year-in-office-l-a-d-a-gascon-touts-accomplishments-spars-with-critics-on-crime':
+                #  print(resp)
+
             if count == 1:  # Existing
                 print('store_data: article already exists, so skipping')
                 return "Existing"
@@ -404,23 +542,25 @@ class RSSParser(BaseParser):
                 )
 
                 url = data['url']
+                img_path = local_path + re.sub(r'\W+', '', data['title']) + '.png'
+
                 if row['url']['S'] != data['url']:
-                    if self.show_diff(row['url']['S'], data['url']):
+                    if self.show_diff(row['url']['S'], data['url'], img_path):
                         tweet_text = "Change in URL"
                         self.tweet(tweet_text, data['article_id'], url,
                                    'article_id')
                 if row['title']['S'] != data['title']:
-                    if self.show_diff(row['title']['S'], data['title']):
+                    if self.show_diff(row['title']['S'], data['title'], img_path):
                         tweet_text = "Change in Headline"
                         self.tweet(tweet_text, data['article_id'], url,
                                    'article_id')
                 if row['abstract']['S'] != data['abstract']:
-                    if self.show_diff(row['abstract']['S'], data['abstract']):
+                    if self.show_diff(row['abstract']['S'], data['abstract'], img_path):
                         tweet_text = "Change in Abstract"
                         self.tweet(tweet_text, data['article_id'], url,
                                    'article_id')
                 if row['author']['S'] != data['author']:
-                    if self.show_diff(row['author']['S'], data['author']):
+                    if self.show_diff(row['author']['S'], data['author'], img_path):
                         tweet_text = "Change in Author"
                         self.tweet(tweet_text, data['article_id'], url,
                                    'article_id')
