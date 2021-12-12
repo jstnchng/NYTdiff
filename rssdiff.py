@@ -218,6 +218,8 @@ class BaseParser(object):
         desired_width = 400
         desired_height = 223
 
+        img_w, img_h = im.size
+
         if img_w > desired_width or img_h > desired_height:
             if img_h > img_w/2:
                 desired_width = img_h*2
@@ -230,7 +232,6 @@ class BaseParser(object):
 
         background = Image.new('RGBA', (desired_width, desired_height), (255, 255, 255, 0))
         bg_w, bg_h = background.size
-        img_w, img_h = im.size
         offset = ((bg_w - img_w) // 2, (bg_h - img_h) // 2)
         background.paste(
             im,
@@ -249,7 +250,7 @@ class BaseParser(object):
         cropped_im = im.crop(border_bbox)
         return self.resize(cropped_im)
 
-    def break_html(string):
+    def break_html(self, string):
         final = ''
         wrap_length = 40
         char_counter = 0
@@ -277,7 +278,7 @@ class BaseParser(object):
         html_diff_str = html_diff(old, new)
         print('show_diff: html_diff str: {}'.format(html_diff_str))
         logging.info(html_diff_str)
-        html_diff_break_str = break_html(html_diff_str)
+        html_diff_break_str = self.break_html(html_diff_str)
         print('show_diff: html_diff str with breaks: {}'.format(html_diff_break_str))
         logging.info(html_diff_str)
 
@@ -338,10 +339,9 @@ class RSSParser(BaseParser):
             return None
         article_dict['author'] = author_name
 
-        if article_dict['article_id'] == 'https://www.latimes.com/california/story/2021-12-05/wars-painful-legacy-twenty-years-later-remembering-brian-cody-prosser':
-            article_dict['title'] = os.environ['new_title']
-        if article_dict['article_id'] == 'https://www.latimes.com/california/story/2021-12-05/shes-terrified-of-covid-works-at-home-he-goes-to-the-office-whats-a-family-to-do':
-            article_dict['title'] = os.environ['new_title']
+        # testing code
+        #  if article_dict['article_id'] == 'https://www.latimes.com/environment/story/2021-12-11/state-cites-flaws-in-san-joaquin-valley-groundwater-plans':
+            #  article_dict['abstract'] = os.environ['new_title']
 
         od = collections.OrderedDict(sorted(article_dict.items()))
         article_dict['hash'] = hashlib.sha224(
