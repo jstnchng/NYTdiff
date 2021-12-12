@@ -13,7 +13,7 @@ Running it locally
 + Set up DynamoDB. Create two tables: rss_ids (partition id: article_id) and
   rss_versions (partition key: article_id, sort_key: version)
 + Set up config.txt. You will need [Twitter keys](https://dev.twitter.com/) and an AWS key pair that has access to the tables created above.
-+ Run ./run_diff.sh
++ Run `./run_diff.sh`
 
 Deploying to AWS
 ------------
@@ -24,6 +24,11 @@ Deploying to AWS
   [here](https://github.com/keithrozario/Klayers/tree/master/deployments/python3.8/arns)
 + Add wkhtmltoimage as a layer. You can find instructions from the wkhtml
   downloads page
++ Package the python code for the lambda. run `pip3 install -r requirements.txt
+  --target ...`. Since we are installing Pillow via the lambda layer, remove the
+pillow directories. Copy the rssdiff.py file into the same directory, and copy
+the img/ fonts/ and css/ folders into a style folder, and move that into the
+same directory. Compress, and upload to lambda
 + Set up a cloudwatch event to trigger the lambda function
 
 Credits
