@@ -41,13 +41,6 @@ else:
 if ENV == 'local':
     local_path = './'
 else:
-    #  os.system('cp /var/task/phantomjs {}/phantomjs'.format(os.environ['LAMBDA_TASK_ROOT']))
-    #  os.system('ls -la /var/task/')
-    #  os.system('ls -la /var/task/style')
-    #  os.system('ls -la /var/task/style/fonts')
-    #  os.system('ls -la /var/task/style/img')
-    #  sys.path.append(os.environ['LAMBDA_TASK_ROOT'])
-    #  os.system('which wkhtmltoimage')
     output_path = os.path.join('/tmp', 'output')
     os.mkdir(output_path)
     local_path = "/tmp/"
@@ -249,19 +242,30 @@ class BaseParser(object):
     def trim(self, im):
         bg = Image.new(im.mode, im.size, im.getpixel((0,0)))
         diff = ImageChops.difference(im, bg)
-        #  print("imgchops diff size")
-        #  print(diff.size)
         diff = ImageChops.add(diff, diff, 2.0, -100)
-        #  print("imgchops diff size2")
-        #  print(diff2.size)
         diff = diff.convert('RGB')
         bbox = diff.getbbox()
-        #  if bbox is None:
-            #  bbox = im.getbbox()
-            #  print(bbox)
         border_bbox = self.add_border(bbox)
         cropped_im = im.crop(border_bbox)
         return self.resize(cropped_im)
+
+    def break_html(string):
+        final = ''
+        wrap_length = 40
+        char_counter = 0
+        current_line_length = 0
+        current_line = ''
+
+        words = string.split()
+        for word in words:
+            current_line += word + ' '
+            current_line_length += len(word) + 1
+            if current_line_length > wrap_length:
+                final += current_line + '<br/>'
+                current_line = ''
+                current_line_length = 0
+
+        return final + current_line
 
     def show_diff(self, old, new, img_path):
         if len(old) == 0 or len(new) == 0:
@@ -269,7 +273,13 @@ class BaseParser(object):
             logging.info('show_diff: Old or New empty')
             return False
         new_hash = hashlib.sha224(new.encode('utf8')).hexdigest()
-        logging.info(html_diff(old, new))
+
+        html_diff_str = html_diff(old, new)
+        print('show_diff: html_diff str: {}'.format(html_diff_str))
+        logging.info(html_diff_str)
+        html_diff_break_str = break_html(html_diff_str)
+        print('show_diff: html_diff str with breaks: {}'.format(html_diff_break_str))
+        logging.info(html_diff_str)
 
         if ENV == 'local':
             css_path = './css/styles.css'
@@ -288,7 +298,7 @@ class BaseParser(object):
           </p>
           </body>
         </html>
-        """.format(css_path, html_diff(old, new))
+        """.format(css_path, html_diff_break_str)
         tmp_path = local_path + 'tmp.html'
         with open(tmp_path, 'w') as f:
             f.write(html)
@@ -297,81 +307,15 @@ class BaseParser(object):
         options = {
             "enable-local-file-access": None
         }
-        #  if ENV == 'local':
-            #  imgkit.from_file(tmp_path, img_path, options=options)
-        #  else:
-            #  config = imgkit.config(wkhtmltoimage='/var/task/wkhtmltoimage')
-            #  imgkit.from_file(tmp_path, img_path, options=options, config=config)
         imgkit.from_file(tmp_path, img_path, options=options)
 
         im = Image.open(img_path)
         im = self.trim(im)
-        #  bg = Image.new(im.mode, im.size, im.getpixel((0,0)))
-        #  diff = ImageChops.difference(im, bg)
-        #  diff = ImageChops.add(diff, diff, 2.0, -100)
-        #  bbox = diff.getbbox()
-#
-        #  border_bbox = (bbox[0] - 50, bbox[1] - 50, bbox[2] + 50, bbox[3] + 50)
-        #  cropped_im = im.crop(border_bbox)
-        #  # cropped_im = im.crop(bbox)
-#
-        #  cropped_im.save(local_path + 'cropped_' + str(int(time.time())) + '.png')
-#
-        #  desired_width = 400
-        #  desired_height = 223
-        #  background = Image.new('RGBA', (desired_width, desired_height), (255, 255, 255, 0))
-        #  bg_w, bg_h = background.size
-        #  img_w, img_h = cropped_im.size
-        #  offset = ((bg_w - img_w) // 2, (bg_h - img_h) // 2)
-        #  background.paste(
-            #  im,
-            #  offset
-        #  )
-#
-        #  background.show()
 
         timestamp = str(int(time.time()))
         self.filename = timestamp + new_hash
 
         im.save(local_path + 'output/' + self.filename + '.png')
-
-        #  if ENV == 'local':
-            #  driver = webdriver.PhantomJS(
-                #  executable_path=PHANTOMJS_PATH + '/phantomjs')
-        #  else:
-            #  driver = webdriver.PhantomJS(
-                #  executable_path=PHANTOMJS_PATH + '/phantomjs',
-                #  service_log_path='/tmp/ghostdriver.log')
-        #  driver.get(tmp_path)
-        #  e = driver.find_element_by_xpath('//p')
-        #  start_height = e.location['y']
-        #  block_height = e.size['height']
-        #  end_height = start_height
-        #  start_width = e.location['x']
-        #  block_width = e.size['width']
-        #  end_width = start_width
-        #  total_height = start_height + block_height + end_height
-        #  total_width = start_width + block_width + end_width
-        #  timestamp = str(int(time.time()))
-        #  driver.save_screenshot(img_path)
-        #  driver.quit()
-        #  img = Image.open(img_path)
-        #  img2 = img.crop((0, 0, total_width, total_height))
-        #  if int(total_width) > int(total_height * 2):
-            #  background = Image.new('RGBA', (total_width, int(total_width / 2)),
-                                   #  (255, 255, 255, 0))
-            #  bg_w, bg_h = background.size
-            #  offset = (int((bg_w - total_width) / 2),
-                      #  int((bg_h - total_height) / 2))
-        #  else:
-            #  background = Image.new('RGBA', (total_width, total_height),
-                                   #  (255, 255, 255, 0))
-            #  bg_w, bg_h = background.size
-            #  offset = (int((bg_w - total_width) / 2),
-                      #  int((bg_h - total_height) / 2))
-        #  background.paste(img2, offset)
-        #  self.filename = timestamp + new_hash
-        #  background.save(local_path + 'output/' + self.filename + '.png')
         return True
 
     def __str__(self):
@@ -404,9 +348,6 @@ class RSSParser(BaseParser):
             repr(od.items()).encode('utf-8')).hexdigest()
         article_dict['date_time'] = datetime.now(LOCAL_TZ).strftime("%Y-%m-%dT%H:%M:%S%z")
 
-        #  if article_dict['article_id'] == 'https://www.latimes.com/california/story/2021-12-08/marking-one-year-in-office-l-a-d-a-gascon-touts-accomplishments-spars-with-critics-on-crime':
-            #  print("new article dict")
-            #  print(article_dict)
         return article_dict
 
     def build_version(self, version, data):
@@ -441,8 +382,6 @@ class RSSParser(BaseParser):
 
     def store_data(self, data):
         response = self.get_article_by_id(data['article_id'])
-        #  if data['article_id'] == 'https://www.latimes.com/california/story/2021-12-08/marking-one-year-in-office-l-a-d-a-gascon-touts-accomplishments-spars-with-critics-on-crime':
-            #  print(response)
 
         # New article
         if response.get('Item') is None:
@@ -494,25 +433,6 @@ class RSSParser(BaseParser):
                 },
             )
             count = count_resp['Count']
-
-            #  resp = self.db.query(
-                #  TableName='rss_versions',
-                #  KeyConditionExpression='article_id = :article_id',
-                #  FilterExpression='#hash = :hash',
-                #  ExpressionAttributeNames={
-                    #  '#hash': 'hash'
-                #  },
-                #  ExpressionAttributeValues={
-                    #  ':article_id': {
-                        #  'S': data['article_id']
-                    #  },
-                    #  ':hash': {
-                        #  'S': data['hash']
-                    #  }
-                #  },
-            #  )
-            #  if data['article_id'] == 'https://www.latimes.com/california/story/2021-12-08/marking-one-year-in-office-l-a-d-a-gascon-touts-accomplishments-spars-with-critics-on-crime':
-                #  print(resp)
 
             if count == 1:  # Existing
                 print('store_data: article already exists, so skipping')
