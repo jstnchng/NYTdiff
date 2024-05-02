@@ -551,9 +551,7 @@ def main():
     consumer_secret = os.environ['TWITTER_CONSUMER_SECRET']
     access_token = os.environ['TWITTER_ACCESS_TOKEN']
     access_token_secret = os.environ['TWITTER_ACCESS_TOKEN_SECRET']
-    auth = tweepy.OAuth1UserHandler(consumer_key, consumer_secret)
-    auth.secure = True
-    auth.set_access_token(access_token, access_token_secret)
+    auth = tweepy.OAuth1UserHandler(consumer_key, consumer_secret, access_token, access_token_secret)
     tweepy_v1_client = tweepy.API(auth)
     print("main: twitter api tweepy v1 client configured")
     logging.debug('Twitter API tweepy v1 client configured')
