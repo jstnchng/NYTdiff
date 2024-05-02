@@ -47,17 +47,18 @@ else:
 
 
 class BaseParser(object):
-    def __init__(self, api, db):
+    def __init__(self, tweepy_v1, tweepy_v2, db):
         self.urls = list()
         self.payload = None
         self.articles = dict()
         self.filename = str()
         self.db = db
-        self.api = api
+        self.tweepy_v1 = tweepy_v1
+        self.tweepy_v2 = tweepy_v2
 
     def test_twitter(self):
-        print(self.api.rate_limit_status())
-        print(self.api.me().name)
+        print(self.tweepy_v1.rate_limit_status())
+        print(self.tweepy_v1.me().name)
 
     def get_article_by_id(self, article_id):
         response = self.db.get_item(
@@ -106,7 +107,7 @@ class BaseParser(object):
         if TESTING:
             return 1
         try:
-            response = self.api.media_upload(filename)
+            response = self.tweepy_v1.media_upload(filename)
         except:
             print (sys.exc_info()[0])
             print('media_upload: uploaded new media')
@@ -120,12 +121,12 @@ class BaseParser(object):
             return True
         try:
             if reply_to is not None:
-                tweet_id = self.api.update_status(
-                    status=text, media_ids=images,
-                    in_reply_to_status_id=reply_to)
+                tweet_id = self.tweepy_v2.create_tweet(
+                    text=text, media_ids=images,
+                    in_reply_to_tweet_id=reply_to)
             else:
-                tweet_id = self.api.update_status(
-                    status=text, media_ids=images)
+                tweet_id = self.tweepy_v2.create_tweet(
+                    text=text, media_ids=images)
         except:
             print('tweet_with_media: failed')
             logging.exception('Tweet with media failed')
@@ -139,7 +140,7 @@ class BaseParser(object):
             return True
         try:
             print("tweet_text: sending new tweet")
-            tweet_id = self.api.update_status(status=text)
+            tweet_id = self.tweepy_v2.create_tweet(text=text)
         except:
             print("tweet_text: tweet failed")
             logging.exception('Tweet text failed')
@@ -324,8 +325,8 @@ class BaseParser(object):
 
 
 class RSSParser(BaseParser):
-    def __init__(self, api, rss_url, db):
-        BaseParser.__init__(self, api, db)
+    def __init__(self, tweepy_v1, tweepy_v2, rss_url, db):
+        BaseParser.__init__(self, tweepy_v1, db)
         self.urls = [rss_url]
 
     def entry_to_dict(self, article):
@@ -454,13 +455,6 @@ class RSSParser(BaseParser):
 
                 row = result['Items'][0]
 
-                data['version'] = row['version']['N']
-                updated_version_data = self.build_version(str(data['version']), data)
-                self.db.put_item(
-                    TableName='rss_versions',
-                    Item=updated_version_data
-                )
-
                 url = data['url']
                 img_path = local_path + re.sub(r'\W+', '', data['title']) + '.png'
 
@@ -485,6 +479,13 @@ class RSSParser(BaseParser):
                         self.tweet(tweet_text, data['article_id'], url,
                                    'article_id')
 
+                data['version'] = row['version']['N'] + 1
+                updated_version_data = self.build_version(str(data['version']), data)
+                self.db.put_item(
+                    TableName='rss_versions',
+                    Item=updated_version_data
+                )
+                
                 return "Changed"
 
     def loop_entries(self, entries):
@@ -550,12 +551,14 @@ def main():
     consumer_secret = os.environ['TWITTER_CONSUMER_SECRET']
     access_token = os.environ['TWITTER_ACCESS_TOKEN']
     access_token_secret = os.environ['TWITTER_ACCESS_TOKEN_SECRET']
-    auth = tweepy.OAuthHandler(consumer_key, consumer_secret)
+    auth = tweepy.OAuth1UserHandler(consumer_key, consumer_secret)
     auth.secure = True
     auth.set_access_token(access_token, access_token_secret)
-    twitter_api = tweepy.API(auth)
-    print("main: twitter api configured")
-    logging.debug('Twitter API configured')
+    tweepy_v1_client = tweepy.API(auth)
+    print("main: twitter api tweepy v1 client configured")
+    logging.debug('Twitter API tweepy v1 client configured')
+
+    tweepy_v2_client = tweepy.Client(consumer_key, consumer_secret, access_token, access_token_secret)
 
     aws_access_key_id = os.environ['AWS_ACCESS_KEY_ID']
     aws_secret_access_key = os.environ['AWS_SECRET_ACCESS_KEY']
@@ -569,7 +572,7 @@ def main():
         print('main: starting RSS parse')
         logging.debug('main: starting RSS parse')
         rss_url = os.environ['RSS_URL']
-        rss = RSSParser(twitter_api, rss_url, db)
+        rss = RSSParser(tweepy_v1_client, tweepy_v2_client, rss_url, db)
         results = rss.parse_rss()
         rss.process_results(results)
         print("main: finished parsing RSS")
